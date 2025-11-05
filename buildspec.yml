@@ -27,8 +27,7 @@ phases:
       - ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)          # WHY: Resolve the current AWS Account ID
       - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-$AWS_REGION}                             # WHY: Normalize region var name if only $AWS_REGION is set
       - ECR_URI="${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"              # WHY: Base registry URI for tagging/pushing
-      - aws ecr get-login-password --region "$AWS_DEFAULT_REGION" | docker login \
-          --username AWS --password-stdin "$ECR_URI"                                     # WHY: Modern ECR login (replaces deprecated get-login)
+      - aws ecr get-login-password --region "$AWS_DEFAULT_REGION" | docker login --username AWS --password-stdin "$ECR_URI"                                     # WHY: Modern ECR login (replaces deprecated get-login)
       - COMMIT_HASH=$(echo "${CODEBUILD_RESOLVED_SOURCE_VERSION:-latest}" | cut -c 1-7)  # WHY: Short tag for traceability
       - IMAGE_TAG=${COMMIT_HASH:-latest}                                                 # WHY: Fallback to 'latest' for manual/zip triggers
 
