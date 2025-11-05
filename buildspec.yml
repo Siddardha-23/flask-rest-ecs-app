@@ -35,15 +35,13 @@ phases:
     commands:
       - echo "Building image ${ECR_URI}/${IMAGE_REPO_NAME}:${IMAGE_TAG} ..."
       - docker build -t "${IMAGE_REPO_NAME}:${IMAGE_TAG}" .                              # WHY: Build the local image
-      - docker tag  "${IMAGE_REPO_NAME}:${IMAGE_TAG}" \
-                    "${ECR_URI}/${IMAGE_REPO_NAME}:${IMAGE_TAG}"                         # WHY: Tag with the ECR registry/repo
+      - docker tag  "${IMAGE_REPO_NAME}:${IMAGE_TAG}" "${ECR_URI}/${IMAGE_REPO_NAME}:${IMAGE_TAG}"                         # WHY: Tag with the ECR registry/repo
 
   post_build:
     commands:
       - echo "Pushing image to ECR ..."
       - docker push "${ECR_URI}/${IMAGE_REPO_NAME}:${IMAGE_TAG}"                         # WHY: Make the image available for ECS to pull
-      - printf '{"ImageURI":"%s"}' \
-          "${ECR_URI}/${IMAGE_REPO_NAME}:${IMAGE_TAG}" > imageDetail.json            
+      - printf '{"ImageURI":"%s"}' "${ECR_URI}/${IMAGE_REPO_NAME}:${IMAGE_TAG}" > imageDetail.json            
 
 artifacts:
   # WHY: Files exported to CodePipeline’s next stage (Deploy).
