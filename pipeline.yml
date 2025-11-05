@@ -1,6 +1,7 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >
-  Modernized CodePipeline: Source (GitHub) → Build (CodeBuild) → Deploy (ECS Fargate via CloudFormation)
+  CodePipeline (GitHub → CodeBuild → CloudFormation ECS).
+  Builds/pushes Docker image to ECR and deploys ecs.yml (no ALB).
 
 Parameters:
   Stage:
@@ -10,7 +11,7 @@ Parameters:
 
   GitHubConnectionArn:
     Type: String
-    Description: CodeStar Connection ARN to GitHub (create it once in AWS console)
+    Description: CodeStar Connections ARN to GitHub (create in AWS Console)
 
   GitHubOwner:
     Type: String
@@ -28,12 +29,12 @@ Parameters:
   ContainerPort:
     Type: Number
     Default: 80
-    Description: Container port your Flask app listens on
+    Description: Container port your app listens on
 
-  # Optional: name your ECR repository
   ECRRepoName:
     Type: String
     Default: flask-rest-ecs-app
+    Description: ECR repository to push images to
 
 Resources:
   # ---------- ECR ----------
@@ -54,7 +55,7 @@ Resources:
             ]
           }
 
-  # ---------- S3 Bucket for artifacts ----------
+  # ---------- Artifact Bucket ----------
   ArtifactBucket:
     Type: AWS::S3::Bucket
     Properties:
@@ -63,7 +64,8 @@ Resources:
           - ServerSideEncryptionByDefault:
               SSEAlgorithm: AES256
 
-  # ---------- Roles ----------
+  # ---------- IAM ROLES ----------
+  # CodePipeline role (least privilege, includes CodeStar Connections + S3 + CodeBuild + CloudFormation + PassRole)
   CodePipelineRole:
     Type: AWS::IAM::Role
     Properties:
@@ -71,22 +73,53 @@ Resources:
         Version: '2012-10-17'
         Statement:
           - Effect: Allow
-            Principal:
-              Service: codepipeline.amazonaws.com
+            Principal: { Service: codepipeline.amazonaws.com }
             Action: sts:AssumeRole
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/AWSCodePipelineFullAccess
-        - arn:aws:iam::aws:policy/AmazonS3FullAccess
-        - arn:aws:iam::aws:policy/CloudWatchLogsFullAccess
       Policies:
-        - PolicyName: inline-passrole
+        - PolicyName: codepipeline-inline
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
+              # S3 artifacts (bucket + objects)
               - Effect: Allow
-                Action: iam:PassRole
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:PutObject
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt ArtifactBucket.Arn
+                  - !Sub "${ArtifactBucket.Arn}/*"
+
+              # Source: use the GitHub CodeStar Connection
+              - Effect: Allow
+                Action: codestar-connections:UseConnection
+                Resource: !Ref GitHubConnectionArn
+
+              # Build: start & get builds (scoped to our project)
+              - Effect: Allow
+                Action:
+                  - codebuild:StartBuild
+                  - codebuild:BatchGetBuilds
+                Resource: !GetAtt BuildProject.Arn
+
+              # Deploy: CloudFormation actions
+              - Effect: Allow
+                Action:
+                  - cloudformation:CreateStack
+                  - cloudformation:UpdateStack
+                  - cloudformation:CreateChangeSet
+                  - cloudformation:ExecuteChangeSet
+                  - cloudformation:DescribeStacks
+                  - cloudformation:DescribeChangeSet
                 Resource: "*"
 
+              # Allow passing the CFN execution role to the Deploy action
+              - Effect: Allow
+                Action: iam:PassRole
+                Resource: !GetAtt CloudFormationDeployRole.Arn
+
+  # CodeBuild role (logs + ECR push for this repo)
   CodeBuildRole:
     Type: AWS::IAM::Role
     Properties:
@@ -94,14 +127,43 @@ Resources:
         Version: '2012-10-17'
         Statement:
           - Effect: Allow
-            Principal:
-              Service: codebuild.amazonaws.com
+            Principal: { Service: codebuild.amazonaws.com }
             Action: sts:AssumeRole
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryPowerUser
-        - arn:aws:iam::aws:policy/AWSCodeBuildDeveloperAccess
-        - arn:aws:iam::aws:policy/CloudWatchLogsFullAccess
+      Policies:
+        - PolicyName: codebuild-inline
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # CloudWatch Logs
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "*"
 
+              # ECR auth
+              - Effect: Allow
+                Action: ecr:GetAuthorizationToken
+                Resource: "*"
+
+              # ECR push/pull to THIS repo
+              - Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:CompleteLayerUpload
+                  - ecr:UploadLayerPart
+                  - ecr:InitiateLayerUpload
+                  - ecr:PutImage
+                  - ecr:BatchGetImage
+                Resource: !Sub arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/${ECRRepoName}
+
+              # Optional: used by buildspec to print account id
+              - Effect: Allow
+                Action: sts:GetCallerIdentity
+                Resource: "*"
+
+  # CloudFormation execution role for the Deploy stage
   CloudFormationDeployRole:
     Type: AWS::IAM::Role
     Properties:
@@ -109,11 +171,39 @@ Resources:
         Version: '2012-10-17'
         Statement:
           - Effect: Allow
-            Principal:
-              Service: cloudformation.amazonaws.com
+            Principal: { Service: cloudformation.amazonaws.com }
             Action: sts:AssumeRole
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/AdministratorAccess
+      Policies:
+        - PolicyName: cfn-deploy-inline
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # ECS + Logs + (light) EC2 Describe for ECS networking references if any
+              - Effect: Allow
+                Action:
+                  - ecs:*
+                  - logs:CreateLogGroup
+                  - logs:PutRetentionPolicy
+                  - logs:DescribeLogGroups
+                  - ec2:Describe*
+                Resource: "*"
+
+              # Read ECR when validating task definitions
+              - Effect: Allow
+                Action:
+                  - ecr:DescribeImages
+                  - ecr:BatchGetImage
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchCheckLayerAvailability
+                Resource: !Sub arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/${ECRRepoName}
+
+              # If your ecs.yml creates task/execution roles with fixed names, allow pass-role to them.
+              # Adjust names if your ecs.yml uses different logical/physical names.
+              - Effect: Allow
+                Action: iam:PassRole
+                Resource:
+                  - !Sub arn:aws:iam::${AWS::AccountId}:role/${Stage}-ecs-exec-role
+                  - !Sub arn:aws:iam::${AWS::AccountId}:role/${Stage}-ecs-task-role
 
   # ---------- CodeBuild Project ----------
   BuildProject:
@@ -121,8 +211,7 @@ Resources:
     Properties:
       Name: !Sub "${Stage}-build"
       ServiceRole: !GetAtt CodeBuildRole.Arn
-      Artifacts:
-        Type: CODEPIPELINE
+      Artifacts: { Type: CODEPIPELINE }
       Environment:
         ComputeType: BUILD_GENERAL1_SMALL
         Image: aws/codebuild/standard:7.0
@@ -136,9 +225,10 @@ Resources:
       Source:
         Type: CODEPIPELINE
         BuildSpec: buildspec.yml
+      Cache: { Type: NO_CACHE }
 
   # ---------- CodePipeline ----------
-  CodePipeline:
+  Pipeline:
     Type: AWS::CodePipeline::Pipeline
     Properties:
       Name: !Sub "${Stage}-ecs-pipeline"
@@ -147,7 +237,6 @@ Resources:
         Type: S3
         Location: !Ref ArtifactBucket
       Stages:
-        # --- Stage 1: Source (GitHub) ---
         - Name: Source
           Actions:
             - Name: GitHub_Source
@@ -164,7 +253,6 @@ Resources:
               OutputArtifacts:
                 - Name: source-output
 
-        # --- Stage 2: Build (CodeBuild) ---
         - Name: Build
           Actions:
             - Name: Build_and_Push
@@ -180,10 +268,9 @@ Resources:
               Configuration:
                 ProjectName: !Ref BuildProject
 
-        # --- Stage 3: Deploy (CloudFormation ECS) ---
         - Name: Deploy
           Actions:
-            - Name: Deploy_to_ECS
+            - Name: CFN_Deploy_ECS
               ActionTypeId:
                 Category: Deploy
                 Owner: AWS
@@ -196,8 +283,8 @@ Resources:
                 ActionMode: CREATE_UPDATE
                 Capabilities: CAPABILITY_NAMED_IAM
                 RoleArn: !GetAtt CloudFormationDeployRole.Arn
-                StackName: !Sub "${Stage}-ECS-Cluster"
-                TemplatePath: source-output::ECS-Cluster.yml
+                StackName: !Sub "${Stage}-ecs"
+                TemplatePath: source-output::ecs.yml
                 ParameterOverrides: !Sub |
                   {
                     "ImageURI" : { "Fn::GetParam" : ["build-output", "imageDetail.json", "ImageURI"] },
@@ -208,8 +295,13 @@ Resources:
 
 Outputs:
   PipelineName:
-    Description: Name of the CodePipeline
-    Value: !Ref CodePipeline
+    Description: CodePipeline name
+    Value: !Ref Pipeline
+
+  ArtifactBucketName:
+    Description: Artifact S3 bucket
+    Value: !Ref ArtifactBucket
+
   ECRRepoUri:
     Description: ECR repository URI
     Value: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${ECRRepoName}"
