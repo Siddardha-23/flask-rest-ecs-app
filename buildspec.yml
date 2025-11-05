@@ -1,0 +1,49 @@
+# WHY: CodeBuild instruction file. It builds a Docker image, logs in to ECR,
+# tags the image with the commit SHA, pushes it, and emits imageDetail.json
+# for downstream pipeline stages (e.g., CloudFormation/ECS deploy).
+version: 0.2
+
+env:
+  # WHY: Static/environment variables used by this build. You can override these
+  #      in the CodeBuild project console if needed.
+  variables:
+    IMAGE_REPO_NAME: "flask-rest-ecs-app"   # ECR repo name (create once in ECR)
+
+phases:
+  install:
+    runtime-versions:
+      docker: 20          # WHY: Use a modern Docker engine in the build image
+    commands:
+      - echo "Installing helper tools (optional) ..."
+      - yum -y -q install jq >/dev/null || true
+      # WHY: jq is handy for debugging/JSON ops; not strictly required.
+
+  pre_build:
+    commands:
+      - echo "Logging in to Amazon ECR ..."
+      - ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)          # WHY: Resolve the current AWS Account ID
+      - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-$AWS_REGION}                             # WHY: Normalize region var name if only $AWS_REGION is set
+      - ECR_URI="${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"              # WHY: Base registry URI for tagging/pushing
+      - aws ecr get-login-password --region "$AWS_DEFAULT_REGION" | docker login \
+          --username AWS --password-stdin "$ECR_URI"                                     # WHY: Modern ECR login (replaces deprecated get-login)
+      - COMMIT_HASH=$(echo "${CODEBUILD_RESOLVED_SOURCE_VERSION:-latest}" | cut -c 1-7)  # WHY: Short tag for traceability
+      - IMAGE_TAG=${COMMIT_HASH:-latest}                                                 # WHY: Fallback to 'latest' for manual/zip triggers
+
+  build:
+    commands:
+      - echo "Building image ${ECR_URI}/${IMAGE_REPO_NAME}:${IMAGE_TAG} ..."
+      - docker build -t "${IMAGE_REPO_NAME}:${IMAGE_TAG}" .                              # WHY: Build the local image
+      - docker tag  "${IMAGE_REPO_NAME}:${IMAGE_TAG}" \
+                    "${ECR_URI}/${IMAGE_REPO_NAME}:${IMAGE_TAG}"                         # WHY: Tag with the ECR registry/repo
+
+  post_build:
+    commands:
+      - echo "Pushing image to ECR ..."
+      - docker push "${ECR_URI}/${IMAGE_REPO_NAME}:${IMAGE_TAG}"                         # WHY: Make the image available for ECS to pull
+      - printf '{"ImageURI":"%s"}' \
+          "${ECR_URI}/${IMAGE_REPO_NAME}:${IMAGE_TAG}" > imageDetail.json            
+
+artifacts:
+  # WHY: Files exported to CodePipeline’s next stage (Deploy).
+  files:
+    - imageDetail.json

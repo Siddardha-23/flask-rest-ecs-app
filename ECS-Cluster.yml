@@ -1,0 +1,301 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Fargate ECS Cluster with ALB (HTTP->HTTPS), Route, and VPC networking (public subnets)
+
+Parameters:
+  Stage:
+    Type: String
+    Default: dev
+
+  ContainerPort:
+    Type: Number
+    Default: 80
+
+  ImageURI:
+    Type: String
+    Description: ECR image URI (e.g. 123456789012.dkr.ecr.us-east-1.amazonaws.com/flask-rest-ecs-app:abcd123)
+
+  HealthCheckPath:
+    Type: String
+    Default: /api/v1/
+
+  CertificateArn:
+    Type: String
+    Description: ACM certificate ARN (same region as ALB). Required for HTTPS listener.
+    
+Resources:
+  # ---------------- VPC / Networking ----------------
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 172.10.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${Stage}-vpc'
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+
+  VPCInternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref VPC
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${Stage}-public-rt'
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: VPCInternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  SubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      CidrBlock: 172.10.1.0/24
+      VpcId: !Ref VPC
+      MapPublicIpOnLaunch: true
+      AvailabilityZone: !Sub '${AWS::Region}a'
+      Tags:
+        - Key: Name
+          Value: !Sub '${Stage}-public-a'
+
+  SubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      CidrBlock: 172.10.2.0/24
+      VpcId: !Ref VPC
+      MapPublicIpOnLaunch: true
+      AvailabilityZone: !Sub '${AWS::Region}b'
+      Tags:
+        - Key: Name
+          Value: !Sub '${Stage}-public-b'
+
+  SubnetAPublicRouteAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref SubnetA
+
+  SubnetBPublicRouteAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref SubnetB
+
+  # ---------------- Security Groups ----------------
+  LoadBalancerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub '${Stage}-alb-sg'
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+
+  ContainerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub '${Stage}-task-sg'
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: !Ref ContainerPort
+          ToPort: !Ref ContainerPort
+          SourceSecurityGroupId: !Ref LoadBalancerSecurityGroup
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+
+  # ---------------- ECS Cluster / Roles ----------------
+  Cluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub '${Stage}-Cluster'
+
+  ExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${Stage}-ExecutionRole'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${Stage}-TaskRole'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: 'sts:AssumeRole'
+
+  # ---------------- Logs ----------------
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/ecs/${Stage}/flask-rest-ecs-app'
+      RetentionInDays: 14
+
+  # ---------------- Task Definition ----------------
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub '${Stage}-task'
+      Cpu: '512'
+      Memory: '1024'
+      NetworkMode: awsvpc
+      RequiresCompatibilities: [FARGATE]
+      ExecutionRoleArn: !GetAtt ExecutionRole.Arn
+      TaskRoleArn: !GetAtt TaskRole.Arn
+      ContainerDefinitions:
+        - Name: !Sub '${Stage}-Container'
+          Image: !Ref ImageURI
+          Essential: true
+          PortMappings:
+            - ContainerPort: !Ref ContainerPort
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: ecs
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - !Sub 'curl -fsS http://localhost:${ContainerPort}/api/v1/ || exit 1'
+            Interval: 30
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 10
+          Environment:
+            - Name: APP_ENV
+              Value: production
+            - Name: LOG_LEVEL
+              Value: info
+
+  # ---------------- ALB / TG / Listeners ----------------
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub '${Stage}-alb'
+      Scheme: internet-facing
+      Type: application
+      IpAddressType: ipv4
+      Subnets:
+        - !Ref SubnetA
+        - !Ref SubnetB
+      SecurityGroups:
+        - !Ref LoadBalancerSecurityGroup
+
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub '${Stage}-tg'
+      VpcId: !Ref VPC
+      TargetType: ip
+      Protocol: HTTP
+      Port: !Ref ContainerPort
+      HealthCheckProtocol: HTTP
+      HealthCheckPort: traffic-port
+      HealthCheckPath: !Ref HealthCheckPath
+      Matcher:
+        HttpCode: "200"
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 5
+
+  HttpListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: redirect
+          RedirectConfig:
+            Protocol: HTTPS
+            Port: '443'
+            StatusCode: HTTP_301
+
+  HttpsListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 443
+      Protocol: HTTPS
+      Certificates:
+        - CertificateArn: !Ref CertificateArn
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+
+  # ---------------- ECS Service ----------------
+  ECSService:
+    Type: AWS::ECS::Service
+    DependsOn: HttpsListener
+    Properties:
+      ServiceName: !Sub '${Stage}-ECSService'
+      Cluster: !Ref Cluster
+      TaskDefinition: !Ref TaskDefinition
+      DesiredCount: 2
+      LaunchType: FARGATE
+      PlatformVersion: LATEST
+      HealthCheckGracePeriodSeconds: 30
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED                   # simple public design; switch to DISABLED for private subnets + NAT
+          Subnets:
+            - !Ref SubnetA
+            - !Ref SubnetB
+          SecurityGroups:
+            - !Ref ContainerSecurityGroup
+      LoadBalancers:
+        - ContainerName: !Sub '${Stage}-Container'
+          ContainerPort: !Ref ContainerPort
+          TargetGroupArn: !Ref TargetGroup
+
+Outputs:
+  VpcId:
+    Value: !Ref VPC
+  PublicSubnets:
+    Value: !Join [",", [!Ref SubnetA, !Ref SubnetB]]
+  AlbDnsName:
+    Value: !GetAtt LoadBalancer.DNSName
+  TargetGroupArn:
+    Value: !Ref TargetGroup
+  ClusterName:
+    Value: !Ref Cluster
+  ServiceName:
+    Value: !Ref ECSService
+  LogGroupName:
+    Value: !Ref LogGroup
