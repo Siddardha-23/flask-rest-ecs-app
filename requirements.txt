@@ -1,0 +1,10 @@
+Flask 
+Flask-Cors 
+Flask-JWT 
+Flask-JWT-Extended 
+Flask-RESTful
+PyJWT
+PyMySQL
+gevent
+gunicorn
+requests
