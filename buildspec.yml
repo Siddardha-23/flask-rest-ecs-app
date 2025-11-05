@@ -11,9 +11,12 @@ env:
 
 phases:
   install:
-    runtime-versions:
-      docker: 20          # WHY: Use a modern Docker engine in the build image
+    # runtime-versions:
+    #   docker: 20          # WHY: Use a modern Docker engine in the build image
+    
     commands:
+      - echo "Verifying Docker is available..."
+      - docker --version
       - echo "Installing helper tools (optional) ..."
       - yum -y -q install jq >/dev/null || true
       # WHY: jq is handy for debugging/JSON ops; not strictly required.

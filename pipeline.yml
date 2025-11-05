@@ -120,62 +120,62 @@ Resources:
                 Resource: !GetAtt CloudFormationDeployRole.Arn
 
   CodeBuildRole:
-  Type: AWS::IAM::Role
-  Properties:
-    AssumeRolePolicyDocument:
-      Version: '2012-10-17'
-      Statement:
-        - Effect: Allow
-          Principal: { Service: codebuild.amazonaws.com }
-          Action: sts:AssumeRole
-    Policies:
-      - PolicyName: codebuild-inline
-        PolicyDocument:
-          Version: '2012-10-17'
-          Statement:
-            # CloudWatch Logs for build logs
-            - Effect: Allow
-              Action:
-                - logs:CreateLogGroup
-                - logs:CreateLogStream
-                - logs:PutLogEvents
-              Resource: "*"
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: codebuild.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: codebuild-inline
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # CloudWatch Logs for build logs
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "*"
 
-            # ECR auth
-            - Effect: Allow
-              Action: ecr:GetAuthorizationToken
-              Resource: "*"
+              # ECR auth
+              - Effect: Allow
+                Action: ecr:GetAuthorizationToken
+                Resource: "*"
 
-            # ECR push/pull to YOUR repo
-            - Effect: Allow
-              Action:
-                - ecr:BatchCheckLayerAvailability
-                - ecr:CompleteLayerUpload
-                - ecr:UploadLayerPart
-                - ecr:InitiateLayerUpload
-                - ecr:PutImage
-                - ecr:BatchGetImage
-              Resource: !Sub arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/${ECRRepoName}
+              # ECR push/pull to YOUR repo
+              - Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:CompleteLayerUpload
+                  - ecr:UploadLayerPart
+                  - ecr:InitiateLayerUpload
+                  - ecr:PutImage
+                  - ecr:BatchGetImage
+                Resource: !Sub arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/${ECRRepoName}
 
-            # (Optional) used in buildspec to echo account id
-            - Effect: Allow
-              Action: sts:GetCallerIdentity
-              Resource: "*"
+              # (Optional) used in buildspec to echo account id
+              - Effect: Allow
+                Action: sts:GetCallerIdentity
+                Resource: "*"
 
-            # ✅ NEW — read source artifact from the artifact bucket
-            - Effect: Allow
-              Action:
-                - s3:GetObject
-                - s3:GetObjectVersion
-              Resource:
-                - !Sub "${ArtifactBucket.Arn}/*"
+              # ✅ NEW — read source artifact from the artifact bucket
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                Resource:
+                  - !Sub "${ArtifactBucket.Arn}/*"
 
-            # ✅ (Nice-to-have) list the bucket to read object versions
-            - Effect: Allow
-              Action:
-                - s3:ListBucket
-              Resource:
-                - !GetAtt ArtifactBucket.Arn
+              # ✅ (Nice-to-have) list the bucket to read object versions
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt ArtifactBucket.Arn
 
   # CloudFormation execution role for the Deploy stage
   CloudFormationDeployRole:
